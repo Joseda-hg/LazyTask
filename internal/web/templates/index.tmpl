@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>LazyTask</title>
+  <style>
+    body { font-family: sans-serif; margin: 2rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: 0.5rem; border-bottom: 1px solid #ddd; text-align: left; }
+    .tags { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>LazyTask</h1>
+  <p>Total tasks: {{.Total}}</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Status</th>
+        <th>Priority</th>
+        <th>Due</th>
+        <th>Tags</th>
+      </tr>
+    </thead>
+    <tbody>
+    {{range .Rows}}
+      <tr>
+        <td style="padding-left: {{.IndentPx}}px"><a href="/tasks/{{.Task.ID}}">{{.Task.Title}}</a></td>
+        <td>{{.Task.Status}}</td>
+        <td>{{.Task.Priority}}</td>
+        <td>{{if .Task.DueAt}}{{.Task.DueAt.Format "2006-01-02"}}{{end}}</td>
+        <td class="tags">{{range $index, $tag := .Task.Tags}}{{if $index}}, {{end}}{{$tag.Name}}{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</body>
+</html>

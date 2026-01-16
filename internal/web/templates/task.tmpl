@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{.Task.Title}} - LazyTask</title>
+  <style>
+    body { font-family: sans-serif; margin: 2rem; }
+    .meta { color: #666; }
+    ul { padding-left: 1.2rem; }
+  </style>
+</head>
+<body>
+  <a href="/">← Back</a>
+  <h1>{{.Task.Title}}</h1>
+  <p class="meta">Status: {{.Task.Status}} | Priority: {{.Task.Priority}}</p>
+  <p>{{.Task.Description}}</p>
+  <p>Due: {{if .Task.DueAt}}{{.Task.DueAt.Format "2006-01-02"}}{{else}}n/a{{end}}</p>
+  <p>Tags: {{range $index, $tag := .Task.Tags}}{{if $index}}, {{end}}{{$tag.Name}}{{end}}</p>
+
+  <h2>History</h2>
+  <ul>
+    {{range .History}}
+      <li>{{.CreatedAt.Format "2006-01-02 15:04"}} - {{.EventType}} ({{.Details}})</li>
+    {{end}}
+  </ul>
+</body>
+</html>
