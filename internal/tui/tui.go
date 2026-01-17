@@ -357,7 +357,7 @@ func (u *UI) layout(gui *gocui.Gui) error {
 	u.renderHeader(headerView)
 
 	footerHeight := 4
-	footerY1 := maxY - 1
+	footerY1 := maxY
 	if footerY1 < 1 {
 		footerY1 = 1
 	}
@@ -745,7 +745,6 @@ func (u *UI) renderFooter(view *gocui.View) {
 	view.SetOrigin(0, 0)
 	view.SetCursor(0, 0)
 
-	fmt.Fprintln(view)
 	fmt.Fprintln(view, "a add | s subtask | e edit | d delete | enter collapse/save | c current | x done | v eventually")
 	fmt.Fprintln(view, "/ search | space tag | tab field | h refresh history | H toggle history | r reload | g clear | tab cycle | 1-6 panes | q quit")
 	if u.status != "" {
