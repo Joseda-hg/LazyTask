@@ -27,6 +27,8 @@ const (
 	viewTagCreate   = "tagCreate"
 )
 
+var roundedFrameRunes = []rune{'─', '│', '╭', '╮', '╰', '╯'}
+
 type UI struct {
 	store *db.Store
 	gui   *gocui.Gui
@@ -50,7 +52,8 @@ type UI struct {
 	doing   []model.Task
 	history []model.HistoryEntry
 
-	collapsed map[int64]bool
+	historyVisible bool
+	collapsed      map[int64]bool
 
 	selectedPending    int
 	selectedDone       int
@@ -89,11 +92,12 @@ func Run(store *db.Store) error {
 	defer gui.Close()
 
 	ui := &UI{
-		store:      store,
-		gui:        gui,
-		focus:      viewPending,
-		activeTags: make(map[string]struct{}),
-		collapsed:  make(map[int64]bool),
+		store:          store,
+		gui:            gui,
+		focus:          viewPending,
+		activeTags:     make(map[string]struct{}),
+		historyVisible: true,
+		collapsed:      make(map[int64]bool),
 	}
 	gui.Mouse = true
 	ui.formEditor = &formEditor{ui: ui}
@@ -148,6 +152,9 @@ func (u *UI) bindKeys(gui *gocui.Gui) error {
 		return err
 	}
 	if err := gui.SetKeybinding("", 'h', gocui.ModNone, u.refreshHistory); err != nil {
+		return err
+	}
+	if err := gui.SetKeybinding("", 'H', gocui.ModNone, u.toggleHistoryPane); err != nil {
 		return err
 	}
 	if err := gui.SetKeybinding("", '/', gocui.ModNone, u.startSearch); err != nil {
@@ -349,11 +356,12 @@ func (u *UI) layout(gui *gocui.Gui) error {
 	headerView.FgColor = gocui.ColorDefault
 	u.renderHeader(headerView)
 
-	footerY1 := maxY - 2
+	footerHeight := 4
+	footerY1 := maxY - 1
 	if footerY1 < 1 {
 		footerY1 = 1
 	}
-	footerY0 := footerY1 - 2
+	footerY0 := footerY1 - (footerHeight - 1)
 	if footerY0 < 1 {
 		footerY0 = 1
 	}
@@ -377,7 +385,7 @@ func (u *UI) layout(gui *gocui.Gui) error {
 	}
 
 	bodyHeight := bodyBottom - bodyTop + 1
-	layout := computeLayout(maxX, bodyHeight)
+	layout := computeLayout(maxX, bodyHeight, u.historyVisible)
 	leftX0 := 0
 	leftX1 := leftX0 + layout.leftWidth - 1
 	gap := 1
@@ -398,15 +406,13 @@ func (u *UI) layout(gui *gocui.Gui) error {
 	highlightedY1 := highlightedY0 + layout.highlighted - 1
 	eventuallyY0 := highlightedY1 + 1
 	eventuallyY1 := eventuallyY0 + layout.eventuallyHeight - 1
-	historyY0 := eventuallyY1 + 1
-	historyY1 := bodyBottom
 
 	pendingView, err := gui.SetView(viewPending, leftX0, pendingY0, leftX1, pendingY1, 0)
 	if err != nil && !goerrors.Is(err, gocui.ErrUnknownView) {
 		return err
 	}
 	if goerrors.Is(err, gocui.ErrUnknownView) {
-		pendingView.Title = "1 Pending"
+		pendingView.Title = "[1] - Pending"
 		pendingView.TitleColor = gocui.ColorRed
 	}
 	applyViewStyle(pendingView, u.focus == viewPending, true)
@@ -417,7 +423,8 @@ func (u *UI) layout(gui *gocui.Gui) error {
 		return err
 	}
 	if goerrors.Is(err, gocui.ErrUnknownView) {
-		doneView.Title = "2 Recently Done"
+		doneView.Title = "[2] - Recently Done"
+
 		doneView.TitleColor = gocui.ColorGreen
 	}
 	applyViewStyle(doneView, u.focus == viewDone, true)
@@ -428,7 +435,8 @@ func (u *UI) layout(gui *gocui.Gui) error {
 		return err
 	}
 	if goerrors.Is(err, gocui.ErrUnknownView) {
-		tagsView.Title = "3 Tags"
+		tagsView.Title = "[3] - Tags"
+
 		tagsView.TitleColor = gocui.ColorCyan
 	}
 	applyViewStyle(tagsView, u.focus == viewTags, false)
@@ -439,9 +447,11 @@ func (u *UI) layout(gui *gocui.Gui) error {
 		return err
 	}
 	if goerrors.Is(err, gocui.ErrUnknownView) {
-		highlightedView.Title = "4 Highlighted"
+		highlightedView.Title = "[4] - Highlighted"
+
 	}
 	applyViewStyle(highlightedView, u.focus == viewHighlighted, false)
+	applyHighlightedStyle(highlightedView, u.focus == viewHighlighted)
 	u.renderHighlighted(highlightedView)
 
 	eventuallyView, err := gui.SetView(viewEventually, rightX0, eventuallyY0, rightX1, eventuallyY1, 0)
@@ -449,22 +459,28 @@ func (u *UI) layout(gui *gocui.Gui) error {
 		return err
 	}
 	if goerrors.Is(err, gocui.ErrUnknownView) {
-		eventuallyView.Title = "5 Eventually"
+		eventuallyView.Title = "[5] - Eventually"
 		eventuallyView.TitleColor = gocui.ColorYellow
 	}
 	applyViewStyle(eventuallyView, u.focus == viewEventually, true)
 	u.renderTaskList(eventuallyView, u.eventually, u.selectedEventually, u.focus == viewEventually, u.eventuallyDepth, u.eventuallyHasChildren)
 
-	historyView, err := gui.SetView(viewHistory, rightX0, historyY0, rightX1, historyY1, 0)
-	if err != nil && !goerrors.Is(err, gocui.ErrUnknownView) {
-		return err
-	}
-	if goerrors.Is(err, gocui.ErrUnknownView) {
-		historyView.Title = "6 History"
-	}
+	if u.historyVisible && layout.historyHeight > 0 {
+		historyY0 := eventuallyY1 + 1
+		historyY1 := min(historyY0+layout.historyHeight-1, bodyBottom)
+		historyView, err := gui.SetView(viewHistory, rightX0, historyY0, rightX1, historyY1, 0)
+		if err != nil && !goerrors.Is(err, gocui.ErrUnknownView) {
+			return err
+		}
+		if goerrors.Is(err, gocui.ErrUnknownView) {
+			historyView.Title = "[6] - History"
+		}
 
-	applyViewStyle(historyView, u.focus == viewHistory, true)
-	u.renderHistory(historyView, u.focus == viewHistory)
+		applyViewStyle(historyView, u.focus == viewHistory, true)
+		u.renderHistory(historyView, u.focus == viewHistory)
+	} else {
+		_ = gui.DeleteView(viewHistory)
+	}
 
 	_, _ = gui.SetViewOnTop(viewHeader)
 	_, _ = gui.SetViewOnTop(viewFooter)
@@ -512,7 +528,7 @@ type layout struct {
 	historyHeight    int
 }
 
-func computeLayout(width, height int) layout {
+func computeLayout(width, height int, historyVisible bool) layout {
 	safeWidth := max(width-2, 20)
 	safeHeight := max(height, 8)
 
@@ -538,18 +554,34 @@ func computeLayout(width, height int) layout {
 		doneHeight = max(safeHeight-pendingHeight-tagsHeight-2, 4)
 	}
 
-	highlighted := int(float64(safeHeight) * 0.4)
-	if highlighted < 4 {
-		highlighted = 4
-	}
 	eventuallyHeight := int(float64(safeHeight) * 0.2)
 	if eventuallyHeight < 3 {
 		eventuallyHeight = 3
 	}
-	historyHeight := safeHeight - highlighted - eventuallyHeight - 2
-	if historyHeight < 4 {
-		historyHeight = 4
-		eventuallyHeight = max(safeHeight-highlighted-historyHeight-2, 3)
+
+	gapCount := 1
+	historyHeight := 0
+	if historyVisible {
+		gapCount = 2
+		historyHeight = min(6, max(3, safeHeight/6))
+		if safeHeight-eventuallyHeight-historyHeight-gapCount < 4 {
+			historyHeight = 0
+			gapCount = 1
+		}
+	}
+
+	highlighted := safeHeight - eventuallyHeight - historyHeight - gapCount
+	if highlighted < 4 {
+		highlighted = 4
+		if historyHeight > 0 {
+			historyHeight = max(safeHeight-eventuallyHeight-highlighted-gapCount, 0)
+		} else {
+			eventuallyHeight = max(safeHeight-highlighted-gapCount, 3)
+		}
+	}
+
+	if historyHeight > 0 && highlighted < 4 {
+		highlighted = 4
 	}
 
 	return layout{
@@ -713,8 +745,9 @@ func (u *UI) renderFooter(view *gocui.View) {
 	view.SetOrigin(0, 0)
 	view.SetCursor(0, 0)
 
+	fmt.Fprintln(view)
 	fmt.Fprintln(view, "a add | s subtask | e edit | d delete | enter collapse/save | c current | x done | v eventually")
-	fmt.Fprintln(view, "/ search | space tag | tab field | h history | r reload | g clear | tab cycle | 1-6 panes | q quit")
+	fmt.Fprintln(view, "/ search | space tag | tab field | h refresh history | H toggle history | r reload | g clear | tab cycle | 1-6 panes | q quit")
 	if u.status != "" {
 		fmt.Fprint(view, u.status)
 	}
@@ -750,7 +783,8 @@ func (u *UI) renderTaskList(view *gocui.View, tasks []model.Task, selected int, 
 		fmt.Fprintf(view, "%s %s%s %s\n", prefix, indent, marker, formatTaskSummary(task))
 	}
 	if focused {
-		view.SetCursor(0, min(selected, len(tasks)-1))
+		ensureSelectionVisible(view, selected, len(tasks))
+		setCursorToSelection(view, selected, len(tasks))
 	}
 }
 
@@ -768,7 +802,8 @@ func (u *UI) renderTags(view *gocui.View) {
 		fmt.Fprintf(view, "%s [%s] %s (%d)\n", prefix, marker, entry.Name, entry.Count)
 	}
 	if u.focus == viewTags {
-		view.SetCursor(0, min(u.selectedTags, len(u.tags)-1))
+		ensureSelectionVisible(view, u.selectedTags, len(u.tags))
+		setCursorToSelection(view, u.selectedTags, len(u.tags))
 	}
 }
 
@@ -833,6 +868,7 @@ func (u *UI) scrollUp(gui *gocui.Gui, view *gocui.View) error {
 		return nil
 	}
 	view.ScrollUp(1)
+	u.syncSelectionWithScroll(view)
 	return nil
 }
 
@@ -847,6 +883,7 @@ func (u *UI) scrollDown(gui *gocui.Gui, view *gocui.View) error {
 		return nil
 	}
 	view.ScrollDown(1)
+	u.syncSelectionWithScroll(view)
 	return nil
 }
 
@@ -924,7 +961,8 @@ func (u *UI) renderHistory(view *gocui.View, focused bool) {
 		fmt.Fprintf(view, "%s %s | %s | %s\n", prefix, entry.CreatedAt.Format("2006-01-02 15:04"), entry.EventType, entry.Details)
 	}
 	if focused {
-		view.SetCursor(0, min(u.selectedHistory, len(u.history)-1))
+		ensureSelectionVisible(view, u.selectedHistory, len(u.history))
+		setCursorToSelection(view, u.selectedHistory, len(u.history))
 	}
 }
 
@@ -1008,7 +1046,23 @@ func (u *UI) focusEventually(gui *gocui.Gui, _ *gocui.View) error {
 }
 
 func (u *UI) focusHistory(gui *gocui.Gui, _ *gocui.View) error {
+	if !u.historyVisible {
+		return nil
+	}
 	return u.setFocus(gui, viewHistory)
+}
+
+func (u *UI) toggleHistoryPane(gui *gocui.Gui, _ *gocui.View) error {
+	if u.inputActive() {
+		return nil
+	}
+
+	u.historyVisible = !u.historyVisible
+	if !u.historyVisible && u.focus == viewHistory {
+		u.focus = viewPending
+		_, _ = gui.SetCurrentView(u.focus)
+	}
+	return u.reload(gui, nil)
 }
 
 func (u *UI) setFocus(gui *gocui.Gui, name string) error {
@@ -1192,6 +1246,7 @@ func (u *UI) showTagCreate(gui *gocui.Gui) error {
 		view.Editor = gocui.DefaultEditor
 		view.Clear()
 	}
+	view.FrameRunes = roundedFrameRunes
 	view.Editable = true
 	view.Editor = gocui.DefaultEditor
 	_, _ = gui.SetCurrentView(viewTagCreate)
@@ -1223,6 +1278,7 @@ func (u *UI) showHelp(gui *gocui.Gui) error {
 		view.Title = "Help"
 		view.Wrap = true
 	}
+	view.FrameRunes = roundedFrameRunes
 	view.Clear()
 	fmt.Fprint(view, helpText())
 	_, _ = gui.SetCurrentView(viewHelp)
@@ -1248,6 +1304,7 @@ func (u *UI) showSearch(gui *gocui.Gui) error {
 		view.Clear()
 		fmt.Fprint(view, u.filter.Query)
 	}
+	view.FrameRunes = roundedFrameRunes
 	view.Editable = true
 	view.Editor = gocui.DefaultEditor
 	_, _ = gui.SetCurrentView(viewSearch)
@@ -1346,6 +1403,7 @@ func (u *UI) showForm(gui *gocui.Gui) error {
 	} else {
 		view.Title = "New Task"
 	}
+	view.FrameRunes = roundedFrameRunes
 	view.Editable = true
 	view.KeybindOnEdit = true
 	view.Editor = u.formEditor
@@ -1784,12 +1842,109 @@ func helpText() string {
 		"  space/left/right cycle status (form)",
 		"",
 		"Other:",
-		"  h refresh history | r reload | ? help | esc/q close help | q quit",
+		"  h refresh history | H toggle history pane | r reload | ? help | esc/q close help | q quit",
 	}, "\n")
+}
+
+func selectionIndexForView(view *gocui.View, total int) int {
+	if view == nil || total <= 0 {
+		return 0
+	}
+	_, height := view.InnerSize()
+	if height <= 0 {
+		return 0
+	}
+	cursorX, cursorY := view.Cursor()
+	if cursorY < 0 {
+		cursorY = 0
+	}
+	if cursorY >= height {
+		cursorY = height - 1
+	}
+	view.SetCursor(cursorX, cursorY)
+	_, originY := view.Origin()
+	index := originY + cursorY
+	if index < 0 {
+		return 0
+	}
+	if index > total-1 {
+		return total - 1
+	}
+	return index
+}
+
+func (u *UI) syncSelectionWithScroll(view *gocui.View) {
+	if view == nil {
+		return
+	}
+	name := view.Name()
+	switch name {
+	case viewPending:
+		u.selectedPending = selectionIndexForView(view, len(u.pending))
+		if u.focus == viewPending {
+			_ = u.loadHistory()
+		}
+	case viewDone:
+		u.selectedDone = selectionIndexForView(view, len(u.done))
+		if u.focus == viewDone {
+			_ = u.loadHistory()
+		}
+	case viewEventually:
+		u.selectedEventually = selectionIndexForView(view, len(u.eventually))
+		if u.focus == viewEventually {
+			_ = u.loadHistory()
+		}
+	case viewTags:
+		u.selectedTags = selectionIndexForView(view, len(u.tags))
+	case viewHistory:
+		u.selectedHistory = selectionIndexForView(view, len(u.history))
+	}
+}
+
+func ensureSelectionVisible(view *gocui.View, selected, total int) {
+	if view == nil || total == 0 || selected < 0 {
+		return
+	}
+	_, height := view.InnerSize()
+	if height <= 0 {
+		return
+	}
+	originX, originY := view.Origin()
+	if selected < originY {
+		view.SetOrigin(originX, selected)
+		return
+	}
+	if selected >= originY+height {
+		newOrigin := selected - height + 1
+		if newOrigin < 0 {
+			newOrigin = 0
+		}
+		view.SetOrigin(originX, newOrigin)
+	}
+}
+
+func setCursorToSelection(view *gocui.View, selected, total int) {
+	if view == nil || total == 0 || selected < 0 {
+		return
+	}
+	_, height := view.InnerSize()
+	if height <= 0 {
+		return
+	}
+	_, originY := view.Origin()
+	cursorY := selected - originY
+	if cursorY < 0 {
+		cursorY = 0
+	}
+	if cursorY >= height {
+		cursorY = height - 1
+	}
+	view.SetCursor(0, cursorY)
 }
 
 func applyViewStyle(view *gocui.View, focused bool, highlight bool) {
 	view.Frame = true
+	view.FrameRunes = roundedFrameRunes
 	view.Highlight = focused && highlight
 	view.HighlightInactive = false
 	view.SelBgColor = gocui.ColorBlue
@@ -1800,7 +1955,17 @@ func applyViewStyle(view *gocui.View, focused bool, highlight bool) {
 		view.TitleColor = gocui.ColorCyan
 	} else {
 		view.FrameColor = gocui.ColorDefault
+		view.TitleColor = gocui.ColorDefault
 	}
+}
+
+func applyHighlightedStyle(view *gocui.View, focused bool) {
+	color := gocui.ColorMagenta
+	if focused {
+		color = gocui.ColorMagenta | gocui.AttrBold
+	}
+	view.FrameColor = color
+	view.TitleColor = color
 }
 
 func max(a, b int) int {

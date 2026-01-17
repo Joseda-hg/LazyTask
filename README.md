@@ -33,9 +33,11 @@ This starts a read-only web UI at `http://localhost:8080`.
 - `q` quit
 - `r` reload
 - `g` clear filters
+- `h` refresh history
+- `H` toggle history pane
 - `?` help
 - `tab` cycle panes
-- `1-5` focus panes (Pending, Done, Tags, Highlighted, History)
+- `1-6` focus panes (Pending, Done, Tags, Highlighted, Eventually, History)
 
 ### Task Actions
 
