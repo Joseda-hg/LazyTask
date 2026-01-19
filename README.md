@@ -10,6 +10,21 @@ LazyTask is a terminal-first task manager inspired by LazyGit/LazyVim. It stores
 - Tag management with multi-select filtering
 - Optional embedded web server for viewing tasks
 
+## Installation
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap Joseda-hg/lazytask
+brew install lazytask
+```
+
+### Winget (Windows)
+
+```powershell
+winget install Joseda-hg.LazyTask
+```
+
 ## Getting Started
 
 ```bash
@@ -69,9 +84,34 @@ The task form is a single window showing all fields. Use:
 
 ## Development
 
+### Versioning
+
+Releases use `YY.MM.DD-Rev`, where `Rev` is the number of commits on that date. The embedded version is available via `--version`.
+
+```bash
+VERSION=$(./scripts/version.sh)
+go build -ldflags "-X main.Version=$VERSION" ./cmd/lazytask
+```
+
+### DevContainer
+
+Open the repo in VS Code and choose "Reopen in Container" to get Go, sqlc, and sqlite tooling preinstalled.
+
+### Build
+
 ```bash
 go build ./...
 ```
+
+### Release Automation
+
+Releases run automatically on pushes to `main` via `.github/workflows/release.yml`.
+
+Required secrets:
+- `HOMEBREW_TAP_TOKEN`: PAT with push access to `Joseda-hg/homebrew-lazytask`.
+- `WINGET_GITHUB_TOKEN`: classic PAT with `public_repo` scope for winget PRs.
+
+Winget requires a one-time bootstrap to create the `Joseda-hg.LazyTask` package in `microsoft/winget-pkgs`. After the first submission, the workflow uses `wingetcreate update` to open PRs on each release.
 
 ## Notes
 

@@ -1,0 +1,29 @@
+Plan for LazyTask v1 release
+
+1. Add build-time versioning
+   - Add Version variable + --version flag in cmd/lazytask/main.go
+   - Create script to compute version (YY.MM.DD-Rev based on daily commit count)
+   - Ensure ldflags injects Version in CI and local builds
+
+2. Add DevContainer support
+   - Add .devcontainer/devcontainer.json and Dockerfile
+   - Include Go toolchain, sqlc, sqlite3 tooling, and common utilities
+   - Add recommended VS Code settings/tasks if needed
+
+3. Add GitHub Actions build + release pipeline
+   - Trigger on push to main
+   - Compute version string and create tag/release
+   - Build binaries for linux/darwin/windows (amd64/arm64)
+   - Upload artifacts to GitHub Release
+
+4. Automate Homebrew tap updates
+   - Generate formula pointing to release artifacts with sha256s
+   - Push formula updates to Joseda-hg/homebrew-lazytask via workflow
+
+5. Automate Winget submission
+   - Generate winget manifests for the Windows installer exe
+   - Open PR to microsoft/winget-pkgs from workflow
+
+6. Update README
+   - Add install instructions for brew + winget
+   - Document versioning and devcontainer usage

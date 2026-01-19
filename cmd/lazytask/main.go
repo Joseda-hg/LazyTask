@@ -14,13 +14,21 @@ import (
 	"github.com/Joseda-hg/lazytask/internal/web"
 )
 
+var Version = "dev"
+
 func main() {
 	configPathFlag := flag.String("config", "", "config file path")
 	dbPathFlag := flag.String("db", "", "sqlite db path")
 	webFlag := flag.Bool("web", false, "enable web server")
 	webOnlyFlag := flag.Bool("web-only", false, "run web server only")
 	portFlag := flag.Int("port", 0, "web server port")
+	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("lazytask %s\n", Version)
+		return
+	}
 
 	cfgPath, err := resolveConfigPath(*configPathFlag)
 	if err != nil {

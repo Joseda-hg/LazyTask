@@ -1,0 +1,19 @@
+{
+  "name": "LazyTask",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "postCreateCommand": "go mod download",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "go.useLanguageServer": true,
+        "go.toolsManagement.autoUpdate": true
+      },
+      "extensions": [
+        "golang.Go",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  }
+}

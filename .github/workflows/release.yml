@@ -1,0 +1,164 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      release_date: ${{ steps.version.outputs.release_date }}
+      release_url: ${{ steps.version.outputs.release_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Compute version
+        id: version
+        run: |
+          VERSION=$(bash scripts/version.sh)
+          TAG="v${VERSION}"
+          RELEASE_DATE=$(date -u +%Y-%m-%d)
+          RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_date=${RELEASE_DATE}" >> "$GITHUB_OUTPUT"
+          echo "release_url=${RELEASE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Build release artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist build
+          for GOOS in linux darwin windows; do
+            for GOARCH in amd64 arm64; do
+              outdir="build/${GOOS}_${GOARCH}"
+              mkdir -p "$outdir"
+              binary="lazytask"
+              if [ "$GOOS" = "windows" ]; then
+                binary="lazytask.exe"
+              fi
+              env GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 \
+                go build -ldflags "-s -w -X main.Version=${VERSION}" -o "$outdir/$binary" ./cmd/lazytask
+              if [ "$GOOS" = "windows" ]; then
+                cp "$outdir/$binary" "dist/lazytask_${VERSION}_windows_${GOARCH}.exe"
+                (cd "$outdir" && zip -r "../../dist/lazytask_${VERSION}_windows_${GOARCH}.zip" "$binary")
+              else
+                tar -C "$outdir" -czf "dist/lazytask_${VERSION}_${GOOS}_${GOARCH}.tar.gz" "$binary"
+              fi
+            done
+          done
+
+      - name: Create tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Create GitHub release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$TAG" dist/* --title "LazyTask $VERSION" --notes "Automated release $VERSION"
+
+  homebrew:
+    needs: release
+    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release.outputs.tag }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          mkdir -p assets
+          gh release download "$TAG" --pattern "lazytask_${VERSION}_darwin_*.tar.gz" --pattern "lazytask_${VERSION}_linux_*.tar.gz" --dir assets
+          echo "DARWIN_AMD64_SHA=$(sha256sum assets/lazytask_${VERSION}_darwin_amd64.tar.gz | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "DARWIN_ARM64_SHA=$(sha256sum assets/lazytask_${VERSION}_darwin_arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "LINUX_AMD64_SHA=$(sha256sum assets/lazytask_${VERSION}_linux_amd64.tar.gz | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "LINUX_ARM64_SHA=$(sha256sum assets/lazytask_${VERSION}_linux_arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: Joseda-hg/homebrew-lazytask
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          mkdir -p homebrew-tap/Formula
+          formula_path="homebrew-tap/Formula/lazytask.rb"
+          bash scripts/generate_homebrew_formula.sh "$VERSION" "$DARWIN_AMD64_SHA" "$DARWIN_ARM64_SHA" "$LINUX_AMD64_SHA" "$LINUX_ARM64_SHA" > "$formula_path"
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/lazytask.rb
+          if git diff --staged --quiet; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git commit -m "lazytask ${VERSION}"
+          git push
+
+  winget:
+    needs: release
+    if: ${{ secrets.WINGET_GITHUB_TOKEN != '' }}
+    runs-on: windows-latest
+    steps:
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "6.0.x"
+
+      - name: Download wingetcreate
+        run: |
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+
+      - name: Submit winget update
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          RELEASE_DATE: ${{ needs.release.outputs.release_date }}
+          RELEASE_URL: ${{ needs.release.outputs.release_url }}
+          WINGET_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $version = $env:VERSION
+          $repo = $env:REPOSITORY
+          $urlX64 = "https://github.com/$repo/releases/download/v$version/lazytask_${version}_windows_amd64.exe"
+          $urlArm64 = "https://github.com/$repo/releases/download/v$version/lazytask_${version}_windows_arm64.exe"
+          .\wingetcreate.exe update Joseda-hg.LazyTask --urls "$urlX64|x64" "$urlArm64|arm64" --version $version --release-date $env:RELEASE_DATE --release-notes-url $env:RELEASE_URL --submit --token $env:WINGET_TOKEN --prtitle "LazyTask $version" --no-open
