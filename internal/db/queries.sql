@@ -10,6 +10,7 @@ SET title = ?,
     status = ?,
     priority = ?,
     due_at = ?,
+    parent_task_id = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
 RETURNING id, parent_task_id, title, description, status, priority, due_at, created_at, updated_at;

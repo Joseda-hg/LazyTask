@@ -90,13 +90,19 @@ func (s *Store) UpdateTask(ctx context.Context, taskID int64, input TaskInput) (
 		dueAt = sql.NullTime{Time: *input.DueAt, Valid: true}
 	}
 
+	var parentTaskID sql.NullInt64
+	if input.ParentTaskID != nil {
+		parentTaskID = sql.NullInt64{Int64: *input.ParentTaskID, Valid: true}
+	}
+
 	updated, err := s.Queries.UpdateTask(ctx, sqlc.UpdateTaskParams{
-		Title:       input.Title,
-		Description: input.Description,
-		Status:      status,
-		Priority:    input.Priority,
-		DueAt:       dueAt,
-		ID:          taskID,
+		Title:        input.Title,
+		Description:  input.Description,
+		Status:       status,
+		Priority:     input.Priority,
+		DueAt:        dueAt,
+		ParentTaskID: parentTaskID,
+		ID:           taskID,
 	})
 	if err != nil {
 		return model.Task{}, err
@@ -395,6 +401,9 @@ func formatTaskDiff(before, after model.Task) string {
 	if before.Priority != after.Priority {
 		changes = append(changes, formatChange("priority", fmt.Sprintf("%d", before.Priority), fmt.Sprintf("%d", after.Priority)))
 	}
+	if formatParent(before.ParentTaskID) != formatParent(after.ParentTaskID) {
+		changes = append(changes, formatChange("parent", formatParent(before.ParentTaskID), formatParent(after.ParentTaskID)))
+	}
 	if formatDue(before.DueAt) != formatDue(after.DueAt) {
 		changes = append(changes, formatChange("due", formatDue(before.DueAt), formatDue(after.DueAt)))
 	}
@@ -428,6 +437,13 @@ func formatDue(value *time.Time) string {
 		return "none"
 	}
 	return value.Format("2006-01-02")
+}
+
+func formatParent(parentID *int64) string {
+	if parentID == nil || *parentID == 0 {
+		return "none"
+	}
+	return fmt.Sprintf("%d", *parentID)
 }
 
 func formatTags(tags []model.Tag) string {

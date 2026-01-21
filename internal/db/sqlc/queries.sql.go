@@ -481,18 +481,20 @@ SET title = ?,
     status = ?,
     priority = ?,
     due_at = ?,
+    parent_task_id = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
 RETURNING id, parent_task_id, title, description, status, priority, due_at, created_at, updated_at
 `
 
 type UpdateTaskParams struct {
-	Title       string       `db:"title" json:"title"`
-	Description string       `db:"description" json:"description"`
-	Status      string       `db:"status" json:"status"`
-	Priority    int64        `db:"priority" json:"priority"`
-	DueAt       sql.NullTime `db:"due_at" json:"due_at"`
-	ID          int64        `db:"id" json:"id"`
+	Title        string        `db:"title" json:"title"`
+	Description  string        `db:"description" json:"description"`
+	Status       string        `db:"status" json:"status"`
+	Priority     int64         `db:"priority" json:"priority"`
+	DueAt        sql.NullTime  `db:"due_at" json:"due_at"`
+	ParentTaskID sql.NullInt64 `db:"parent_task_id" json:"parent_task_id"`
+	ID           int64         `db:"id" json:"id"`
 }
 
 func (q *Queries) UpdateTask(ctx context.Context, arg UpdateTaskParams) (Task, error) {
@@ -502,6 +504,7 @@ func (q *Queries) UpdateTask(ctx context.Context, arg UpdateTaskParams) (Task, e
 		arg.Status,
 		arg.Priority,
 		arg.DueAt,
+		arg.ParentTaskID,
 		arg.ID,
 	)
 	var i Task

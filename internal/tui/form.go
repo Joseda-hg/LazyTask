@@ -120,11 +120,12 @@ func joinTags(tags []model.Tag) string {
 
 func taskInputFromTask(task model.Task) db.TaskInput {
 	return db.TaskInput{
-		Title:       task.Title,
-		Description: task.Description,
-		Status:      task.Status,
-		Priority:    task.Priority,
-		DueAt:       task.DueAt,
-		Tags:        parseTags(joinTags(task.Tags)),
+		Title:        task.Title,
+		Description:  task.Description,
+		Status:       task.Status,
+		Priority:     task.Priority,
+		DueAt:        task.DueAt,
+		ParentTaskID: task.ParentTaskID,
+		Tags:         parseTags(joinTags(task.Tags)),
 	}
 }

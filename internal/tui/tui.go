@@ -54,6 +54,8 @@ type UI struct {
 
 	historyVisible bool
 	collapsed      map[int64]bool
+	moveActive     bool
+	moveTaskID     int64
 
 	selectedPending    int
 	selectedDone       int
@@ -78,6 +80,7 @@ type formState struct {
 	parentTaskID *int64
 	fields       []formField
 	index        int
+	cursors      []int
 }
 
 type formEditor struct {
@@ -149,6 +152,15 @@ func (u *UI) bindKeys(gui *gocui.Gui) error {
 		return err
 	}
 	if err := gui.SetKeybinding("", 'v', gocui.ModNone, u.toggleEventually); err != nil {
+		return err
+	}
+	if err := gui.SetKeybinding("", 'm', gocui.ModNone, u.toggleMoveMode); err != nil {
+		return err
+	}
+	if err := gui.SetKeybinding("", 'u', gocui.ModNone, u.unparentMoveTask); err != nil {
+		return err
+	}
+	if err := gui.SetKeybinding("", gocui.KeyEsc, gocui.ModNone, u.cancelMoveMode); err != nil {
 		return err
 	}
 	if err := gui.SetKeybinding("", 'h', gocui.ModNone, u.refreshHistory); err != nil {
@@ -745,7 +757,7 @@ func (u *UI) renderFooter(view *gocui.View) {
 	view.SetOrigin(0, 0)
 	view.SetCursor(0, 0)
 
-	fmt.Fprintln(view, "a add | s subtask | e edit | d delete | enter collapse/save | c current | x done | v eventually")
+	fmt.Fprintln(view, "a add | s subtask | e edit | d delete | m move | enter collapse/save | c current | x done | v eventually")
 	fmt.Fprintln(view, "/ search | space tag | tab field | h refresh history | H toggle history | r reload | g clear | tab cycle | 1-6 panes | q quit")
 	if u.status != "" {
 		fmt.Fprint(view, u.status)
@@ -1025,10 +1037,20 @@ func (u *UI) switchFocus(gui *gocui.Gui, _ *gocui.View) error {
 }
 
 func (u *UI) focusPending(gui *gocui.Gui, _ *gocui.View) error {
+	if u.moveActive {
+		if err := u.moveTask(gui, nil, viewPending); err != nil {
+			return err
+		}
+	}
 	return u.setFocus(gui, viewPending)
 }
 
 func (u *UI) focusDone(gui *gocui.Gui, _ *gocui.View) error {
+	if u.moveActive {
+		if err := u.moveTask(gui, nil, viewDone); err != nil {
+			return err
+		}
+	}
 	return u.setFocus(gui, viewDone)
 }
 
@@ -1041,6 +1063,11 @@ func (u *UI) focusHighlighted(gui *gocui.Gui, _ *gocui.View) error {
 }
 
 func (u *UI) focusEventually(gui *gocui.Gui, _ *gocui.View) error {
+	if u.moveActive {
+		if err := u.moveTask(gui, nil, viewEventually); err != nil {
+			return err
+		}
+	}
 	return u.setFocus(gui, viewEventually)
 }
 
@@ -1225,6 +1252,97 @@ func (u *UI) closeTagCreate(gui *gocui.Gui) error {
 	return u.loadTasks()
 }
 
+func (u *UI) toggleMoveMode(gui *gocui.Gui, _ *gocui.View) error {
+	if u.inputActive() {
+		return nil
+	}
+	if !u.moveActive {
+		if u.focus != viewPending && u.focus != viewDone && u.focus != viewEventually {
+			return nil
+		}
+		selected := u.selectedTask()
+		if selected == nil {
+			return nil
+		}
+		u.moveActive = true
+		u.moveTaskID = selected.ID
+		u.status = "Move: pick target task and press m (subtask), 1/2/5 move pane, u unparent, esc cancel"
+		return nil
+	}
+
+	return u.completeMove(gui)
+}
+
+func (u *UI) cancelMoveMode(_ *gocui.Gui, _ *gocui.View) error {
+	if u.inputActive() || !u.moveActive {
+		return nil
+	}
+	u.moveActive = false
+	u.moveTaskID = 0
+	u.status = ""
+	return nil
+}
+
+func (u *UI) unparentMoveTask(gui *gocui.Gui, _ *gocui.View) error {
+	if u.inputActive() || !u.moveActive {
+		return nil
+	}
+	return u.moveTask(gui, nil, "")
+}
+
+func (u *UI) completeMove(gui *gocui.Gui) error {
+	if !u.moveActive {
+		return nil
+	}
+	if u.focus != viewPending && u.focus != viewDone && u.focus != viewEventually {
+		u.status = "Move: select a task list pane to drop"
+		return nil
+	}
+
+	selected := u.selectedTask()
+	if selected == nil {
+		return u.moveTask(gui, nil, u.focus)
+	}
+	if selected.ID == u.moveTaskID {
+		return u.moveTask(gui, nil, "")
+	}
+	if u.isDescendant(selected.ID, u.moveTaskID) {
+		u.status = "Move: cannot move task under its descendant"
+		return nil
+	}
+	return u.moveTask(gui, &selected.ID, "")
+}
+
+func (u *UI) moveTask(gui *gocui.Gui, parentID *int64, targetView string) error {
+	if !u.moveActive {
+		return nil
+	}
+	if targetView != "" && targetView != viewPending && targetView != viewDone && targetView != viewEventually {
+		return nil
+	}
+
+	task, err := u.taskByID(u.moveTaskID)
+	if err != nil {
+		u.status = err.Error()
+		return nil
+	}
+	input := taskInputFromTask(task)
+	if targetView != "" {
+		input.Status = statusForView(targetView)
+		input.ParentTaskID = nil
+	} else {
+		input.ParentTaskID = parentID
+	}
+	if _, err := u.store.UpdateTask(context.Background(), task.ID, input); err != nil {
+		u.status = err.Error()
+		return nil
+	}
+	u.moveActive = false
+	u.moveTaskID = 0
+	u.status = ""
+	return u.loadTasks()
+}
+
 func (u *UI) showTagCreate(gui *gocui.Gui) error {
 	maxX, maxY := gui.Size()
 	width := max(40, maxX/3)
@@ -1328,20 +1446,20 @@ func (u *UI) cancelSearch(gui *gocui.Gui, _ *gocui.View) error {
 }
 
 func (u *UI) addTask(gui *gocui.Gui, _ *gocui.View) error {
-	if u.inputActive() {
+	if u.inputActive() || u.moveActive {
 		return nil
 	}
 	fields := buildFormFields(nil)
 	if u.focus == viewEventually {
 		fields[fieldStatus].Value = "eventually"
 	}
-	u.form = &formState{fields: fields}
+	u.form = &formState{fields: fields, cursors: initFormCursors(fields)}
 	u.formTagIndex = 0
 	return nil
 }
 
 func (u *UI) addSubtask(gui *gocui.Gui, _ *gocui.View) error {
-	if u.inputActive() {
+	if u.inputActive() || u.moveActive {
 		return nil
 	}
 	selected := u.selectedTask()
@@ -1353,13 +1471,13 @@ func (u *UI) addSubtask(gui *gocui.Gui, _ *gocui.View) error {
 	fields[fieldStatus].Value = selected.Status
 	fields[fieldTags].Value = joinTags(selected.Tags)
 	parentID := selected.ID
-	u.form = &formState{fields: fields, parentTaskID: &parentID}
+	u.form = &formState{fields: fields, parentTaskID: &parentID, cursors: initFormCursors(fields)}
 	u.formTagIndex = 0
 	return nil
 }
 
 func (u *UI) editTask(gui *gocui.Gui, _ *gocui.View) error {
-	if u.inputActive() {
+	if u.inputActive() || u.moveActive {
 		return nil
 	}
 	selected := u.selectedTask()
@@ -1367,7 +1485,7 @@ func (u *UI) editTask(gui *gocui.Gui, _ *gocui.View) error {
 		return nil
 	}
 	fields := buildFormFields(selected)
-	u.form = &formState{taskID: selected.ID, fields: fields}
+	u.form = &formState{taskID: selected.ID, fields: fields, cursors: initFormCursors(fields)}
 	u.formTagIndex = 0
 	return nil
 }
@@ -1403,6 +1521,7 @@ func (u *UI) showForm(gui *gocui.Gui) error {
 		view.Title = "New Task"
 	}
 	view.FrameRunes = roundedFrameRunes
+	view.Wrap = true
 	view.Editable = true
 	view.KeybindOnEdit = true
 	view.Editor = u.formEditor
@@ -1456,6 +1575,7 @@ func (u *UI) nextFormField(gui *gocui.Gui, view *gocui.View) error {
 	if u.form.index < len(u.form.fields)-1 {
 		u.form.index++
 	}
+	u.setCursorToEnd(u.form.index)
 	u.renderForm(view)
 	return nil
 }
@@ -1467,6 +1587,7 @@ func (u *UI) prevFormField(gui *gocui.Gui, view *gocui.View) error {
 	if u.form.index > 0 {
 		u.form.index--
 	}
+	u.setCursorToEnd(u.form.index)
 	u.renderForm(view)
 	return nil
 }
@@ -1481,7 +1602,7 @@ func (u *UI) renderForm(view *gocui.View) {
 		if index == u.form.index {
 			prefix = "> "
 		}
-		value := field.Value
+		value := sanitizeFormValue(field.Value)
 		if isTagsField(field.Label) {
 			candidate := u.currentTagOption()
 			if candidate != "" {
@@ -1490,9 +1611,10 @@ func (u *UI) renderForm(view *gocui.View) {
 		}
 		fmt.Fprintf(view, "%s%s: %s\n", prefix, field.Label, value)
 	}
-	label := u.form.fields[u.form.index].Label + ": "
-	cursorX := len([]rune(label)) + len([]rune(u.form.fields[u.form.index].Value)) + 2
-	view.SetCursor(cursorX, u.form.index)
+	width, _ := view.InnerSize()
+	cursorX, cursorY := u.formCursorPosition(width)
+	view.SetCursor(cursorX, cursorY)
+	ensureFormCursorVisible(view, cursorX, cursorY)
 }
 
 func (e *formEditor) Edit(view *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) bool {
@@ -1509,6 +1631,7 @@ func (e *formEditor) Edit(view *gocui.View, key gocui.Key, ch rune, mod gocui.Mo
 		case gocui.KeyArrowLeft:
 			field.Value = prevStatus(field.Value)
 		}
+		ui.setCursorToEnd(ui.form.index)
 		ui.renderForm(view)
 		return true
 	}
@@ -1522,24 +1645,33 @@ func (e *formEditor) Edit(view *gocui.View, key gocui.Key, ch rune, mod gocui.Mo
 		case gocui.KeySpace:
 			ui.toggleTagInField(field)
 		}
+		ui.setCursorToEnd(ui.form.index)
 		ui.renderForm(view)
 		return true
 	}
 
 	switch key {
+	case gocui.KeyArrowLeft:
+		ui.moveFieldCursor(ui.form.index, -1)
+		ui.renderForm(view)
+		return true
+	case gocui.KeyArrowRight:
+		ui.moveFieldCursor(ui.form.index, 1)
+		ui.renderForm(view)
+		return true
 	case gocui.KeyBackspace, gocui.KeyBackspace2:
-		runes := []rune(field.Value)
-		if len(runes) > 0 {
-			field.Value = string(runes[:len(runes)-1])
-		}
-	case gocui.KeySpace:
-		field.Value += " "
+		ui.deleteRuneBeforeCursor(field, ui.form.index)
+	case gocui.KeyDelete:
+		ui.deleteRuneAtCursor(field, ui.form.index)
 	case gocui.KeyCtrlU:
 		field.Value = ""
+		ui.moveFieldCursor(ui.form.index, -ui.cursorForField(ui.form.index, 0))
+	case gocui.KeySpace:
+		ui.insertRuneAtCursor(field, ui.form.index, ' ')
 	}
 
-	if ch != 0 && ch != '\n' && ch != '\r' && mod == 0 {
-		field.Value += string(ch)
+	if ch != 0 && ch != '\n' && ch != '\r' && mod == 0 && key != gocui.KeySpace {
+		ui.insertRuneAtCursor(field, ui.form.index, ch)
 	}
 
 	ui.renderForm(view)
@@ -1552,6 +1684,99 @@ func isStatusField(label string) bool {
 
 func isTagsField(label string) bool {
 	return strings.HasPrefix(label, "Tags")
+}
+
+func initFormCursors(fields []formField) []int {
+	cursors := make([]int, len(fields))
+	for i, field := range fields {
+		cursors[i] = len([]rune(sanitizeFormValue(field.Value)))
+	}
+	return cursors
+}
+
+func sanitizeFormValue(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "\n", " "), "\r", " ")
+}
+
+func (u *UI) cursorForField(index int, max int) int {
+	if u.form == nil || index < 0 || index >= len(u.form.cursors) {
+		return 0
+	}
+	cursor := u.form.cursors[index]
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > max {
+		cursor = max
+	}
+	u.form.cursors[index] = cursor
+	return cursor
+}
+
+func (u *UI) setCursorToEnd(index int) {
+	if u.form == nil || index < 0 || index >= len(u.form.fields) || index >= len(u.form.cursors) {
+		return
+	}
+	u.form.cursors[index] = len([]rune(sanitizeFormValue(u.form.fields[index].Value)))
+}
+
+func (u *UI) moveFieldCursor(index int, delta int) {
+	if u.form == nil || index < 0 || index >= len(u.form.fields) || index >= len(u.form.cursors) {
+		return
+	}
+	valueLen := len([]rune(u.form.fields[index].Value))
+	valueLen = len([]rune(sanitizeFormValue(u.form.fields[index].Value)))
+	cursor := u.form.cursors[index] + delta
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > valueLen {
+		cursor = valueLen
+	}
+	u.form.cursors[index] = cursor
+}
+
+func (u *UI) insertRuneAtCursor(field *formField, index int, ch rune) {
+	if u.form == nil || field == nil || index < 0 || index >= len(u.form.cursors) {
+		return
+	}
+	field.Value = sanitizeFormValue(field.Value)
+	runes := []rune(field.Value)
+	cursor := u.cursorForField(index, len(runes))
+	runes = append(runes, 0)
+	copy(runes[cursor+1:], runes[cursor:])
+	runes[cursor] = ch
+	field.Value = string(runes)
+	u.form.cursors[index] = cursor + 1
+}
+
+func (u *UI) deleteRuneBeforeCursor(field *formField, index int) {
+	if u.form == nil || field == nil || index < 0 || index >= len(u.form.cursors) {
+		return
+	}
+	field.Value = sanitizeFormValue(field.Value)
+	runes := []rune(field.Value)
+	cursor := u.cursorForField(index, len(runes))
+	if cursor <= 0 || len(runes) == 0 {
+		return
+	}
+	runes = append(runes[:cursor-1], runes[cursor:]...)
+	field.Value = string(runes)
+	u.form.cursors[index] = cursor - 1
+}
+
+func (u *UI) deleteRuneAtCursor(field *formField, index int) {
+	if u.form == nil || field == nil || index < 0 || index >= len(u.form.cursors) {
+		return
+	}
+	field.Value = sanitizeFormValue(field.Value)
+	runes := []rune(field.Value)
+	cursor := u.cursorForField(index, len(runes))
+	if cursor >= len(runes) || len(runes) == 0 {
+		return
+	}
+	runes = append(runes[:cursor], runes[cursor+1:]...)
+	field.Value = string(runes)
 }
 
 func nextStatus(current string) string {
@@ -1646,7 +1871,7 @@ func cycleTag(options []string, current string, delta int) string {
 }
 
 func (u *UI) deleteTask(gui *gocui.Gui, _ *gocui.View) error {
-	if u.inputActive() {
+	if u.inputActive() || u.moveActive {
 		return nil
 	}
 	selected := u.selectedTask()
@@ -1680,7 +1905,7 @@ func (u *UI) deleteTag(gui *gocui.Gui, _ *gocui.View) error {
 }
 
 func (u *UI) toggleCollapse(gui *gocui.Gui, _ *gocui.View) error {
-	if u.inputActive() {
+	if u.inputActive() || u.moveActive {
 		return nil
 	}
 	if u.focus != viewPending && u.focus != viewDone && u.focus != viewEventually {
@@ -1710,7 +1935,7 @@ func (u *UI) toggleCollapse(gui *gocui.Gui, _ *gocui.View) error {
 }
 
 func (u *UI) toggleDoing(gui *gocui.Gui, _ *gocui.View) error {
-	if u.inputActive() {
+	if u.inputActive() || u.moveActive {
 		return nil
 	}
 	selected := u.selectedTask()
@@ -1732,7 +1957,7 @@ func (u *UI) toggleDoing(gui *gocui.Gui, _ *gocui.View) error {
 }
 
 func (u *UI) toggleDone(gui *gocui.Gui, _ *gocui.View) error {
-	if u.inputActive() {
+	if u.inputActive() || u.moveActive {
 		return nil
 	}
 	selected := u.selectedTask()
@@ -1754,7 +1979,7 @@ func (u *UI) toggleDone(gui *gocui.Gui, _ *gocui.View) error {
 }
 
 func (u *UI) toggleEventually(gui *gocui.Gui, _ *gocui.View) error {
-	if u.inputActive() {
+	if u.inputActive() || u.moveActive {
 		return nil
 	}
 	selected := u.selectedTask()
@@ -1810,6 +2035,56 @@ func (u *UI) inputActive() bool {
 	return u.searchActive || u.form != nil || u.helpActive || u.tagCreateActive
 }
 
+func (u *UI) taskByID(taskID int64) (model.Task, error) {
+	for _, task := range u.pending {
+		if task.ID == taskID {
+			return task, nil
+		}
+	}
+	for _, task := range u.done {
+		if task.ID == taskID {
+			return task, nil
+		}
+	}
+	for _, task := range u.eventually {
+		if task.ID == taskID {
+			return task, nil
+		}
+	}
+	return u.store.GetTaskWithTags(context.Background(), taskID)
+}
+
+func (u *UI) isDescendant(taskID, ancestorID int64) bool {
+	parentByID := make(map[int64]int64)
+	for _, task := range u.pending {
+		if task.ParentTaskID != nil {
+			parentByID[task.ID] = *task.ParentTaskID
+		}
+	}
+	for _, task := range u.done {
+		if task.ParentTaskID != nil {
+			parentByID[task.ID] = *task.ParentTaskID
+		}
+	}
+	for _, task := range u.eventually {
+		if task.ParentTaskID != nil {
+			parentByID[task.ID] = *task.ParentTaskID
+		}
+	}
+
+	current := taskID
+	for {
+		parentID, ok := parentByID[current]
+		if !ok || parentID == 0 {
+			return false
+		}
+		if parentID == ancestorID {
+			return true
+		}
+		current = parentID
+	}
+}
+
 func (u *UI) quit(_ *gocui.Gui, _ *gocui.View) error {
 	return gocui.ErrQuit
 }
@@ -1824,9 +2099,12 @@ func helpText() string {
 		"  mouse wheel scrolls hovered pane",
 		"",
 		"Actions:",
-		"  a add task | s add subtask | e edit task | d delete task/tag",
+		"  a add task | s add subtask | e edit task | d delete task/tag | m move",
 		"  c current | x toggle done | v eventually",
 		"  enter collapse/expand (lists) | enter save (form) | tab next field",
+		"",
+		"Move:",
+		"  m pick/drop task | 1/2/5 move to pane | u unparent | esc cancel",
 		"",
 		"Search/Filter:",
 		"  / search | g clear filters",
@@ -1922,6 +2200,145 @@ func ensureSelectionVisible(view *gocui.View, selected, total int) {
 	}
 }
 
+func ensureFormCursorVisible(view *gocui.View, cursorX, cursorY int) {
+	if view == nil {
+		return
+	}
+	width, height := view.InnerSize()
+	if width <= 0 || height <= 0 {
+		return
+	}
+	originX, originY := view.Origin()
+	if cursorY < originY {
+		originY = cursorY
+	}
+	if cursorY >= originY+height {
+		originY = cursorY - height + 1
+		if originY < 0 {
+			originY = 0
+		}
+	}
+	if view.Wrap {
+		originX = 0
+	} else {
+		if cursorX < originX {
+			originX = cursorX
+		}
+		if cursorX >= originX+width {
+			originX = cursorX - width + 1
+			if originX < 0 {
+				originX = 0
+			}
+		}
+	}
+	view.SetOrigin(originX, originY)
+}
+
+func (u *UI) formCursorPosition(width int) (int, int) {
+	if u.form == nil || width <= 0 {
+		return 0, 0
+	}
+	row := 0
+	for i, field := range u.form.fields {
+		prefix := "  "
+		if i == u.form.index {
+			prefix = "> "
+		}
+		label := field.Label + ": "
+		value := sanitizeFormValue(field.Value)
+		lineRunes := []rune(prefix + label + value)
+		segments := wrapSegments(lineRunes, width)
+		lines := len(segments)
+		if i == u.form.index {
+			cursorPos := u.cursorForField(i, len([]rune(value)))
+			cursorIndex := len([]rune(prefix)) + len([]rune(label)) + cursorPos
+			lineIndex, col := cursorPositionInSegments(cursorIndex, segments)
+			return col, row + lineIndex
+		}
+		row += lines
+	}
+	return 0, 0
+}
+
+type wrapSegment struct {
+	start int
+	end   int
+}
+
+func wrapSegments(line []rune, columns int) []wrapSegment {
+	if columns <= 0 {
+		return []wrapSegment{{start: 0, end: len(line)}}
+	}
+	var n int
+	offset := 0
+	lastWhitespaceIndex := -1
+	segments := make([]wrapSegment, 0, 1)
+	for i := range line {
+		currChr := line[i]
+		rw := 1
+		n += rw
+		if n > columns {
+			switch currChr {
+			case ' ':
+				segments = append(segments, wrapSegment{start: offset, end: i})
+				offset = i + 1
+				n = 0
+			case '-':
+				segments = append(segments, wrapSegment{start: offset, end: i})
+				offset = i
+				n = rw
+			default:
+				if lastWhitespaceIndex != -1 {
+					if line[lastWhitespaceIndex] == '-' {
+						segments = append(segments, wrapSegment{start: offset, end: lastWhitespaceIndex + 1})
+					} else {
+						segments = append(segments, wrapSegment{start: offset, end: lastWhitespaceIndex})
+					}
+					offset = lastWhitespaceIndex + 1
+					n = 0
+					for range line[offset : i+1] {
+						n += 1
+					}
+				} else {
+					segments = append(segments, wrapSegment{start: offset, end: i})
+					offset = i
+					n = rw
+				}
+			}
+			lastWhitespaceIndex = -1
+		} else if currChr == ' ' || currChr == '-' {
+			lastWhitespaceIndex = i
+		}
+	}
+	segments = append(segments, wrapSegment{start: offset, end: len(line)})
+	return segments
+}
+
+func cursorPositionInSegments(cursor int, segments []wrapSegment) (int, int) {
+	if len(segments) == 0 {
+		return 0, 0
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	last := segments[len(segments)-1]
+	if cursor > last.end {
+		cursor = last.end
+	}
+	for i, segment := range segments {
+		if cursor < segment.start {
+			return i, 0
+		}
+		if cursor >= segment.start && cursor <= segment.end {
+			if cursor == segment.end && i+1 < len(segments) && segments[i+1].start > segment.end {
+				return i + 1, 0
+			}
+			return i, cursor - segment.start
+		}
+	}
+	return len(segments) - 1, last.end - last.start
+}
+
 func setCursorToSelection(view *gocui.View, selected, total int) {
 	if view == nil || total == 0 || selected < 0 {
 		return
@@ -1965,6 +2382,17 @@ func applyHighlightedStyle(view *gocui.View, focused bool) {
 	}
 	view.FrameColor = color
 	view.TitleColor = color
+}
+
+func statusForView(viewName string) string {
+	switch viewName {
+	case viewDone:
+		return "done"
+	case viewEventually:
+		return "eventually"
+	default:
+		return "todo"
+	}
 }
 
 func max(a, b int) int {
